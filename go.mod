@@ -2,4 +2,4 @@ module github.com/chirag-diwan/Doc.git
 
 go 1.25.6
 
-require github.com/yuin/gopher-lua v1.1.1 // indirect
+require github.com/neovim/go-client v1.2.1 // indirect
