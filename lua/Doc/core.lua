@@ -16,21 +16,20 @@ local defaults = {
   },
 }
 
--- Dynamic Highlights
+
 local function set_highlights()
-  -- 1. Main Transparent Background (Crucial for the "see-through" look)
   vim.api.nvim_set_hl(0, "DocsTransparent", { bg = "NONE", default = true })
 
-  -- 2. Selection Highlight (Uses your theme's Popup Menu Selection)
+
   vim.api.nvim_set_hl(0, "DocsSel", { link = "PmenuSel", default = true })
 
-  -- 3. Border: Try to grab the theme's border color, but FORCE background to NONE
+
   local border_hl = vim.api.nvim_get_hl(0, { name = "FloatBorder", link = false })
-  -- Fallback to 'Normal' foreground if FloatBorder isn't set, ensuring visibility
+
   local border_fg = border_hl.fg or vim.api.nvim_get_hl(0, { name = "Normal" }).fg
   vim.api.nvim_set_hl(0, "DocsBorder", { fg = border_fg, bg = "NONE", default = true })
 
-  -- 4. Text Highlights
+
   vim.api.nvim_set_hl(0, "DocsTitle", { link = "FloatTitle", default = true })
   vim.api.nvim_set_hl(0, "DocsType", { link = "Type", default = true })
   vim.api.nvim_set_hl(0, "DocsName", { link = "Function", default = true })
@@ -59,7 +58,7 @@ function m.setup(config)
 
   set_highlights()
 
-  -- Ensure highlights stick even if colorscheme changes
+
   vim.api.nvim_create_autocmd("ColorScheme", {
     callback = set_highlights,
   })
@@ -126,7 +125,6 @@ local function close_windows()
 end
 
 function m.makeWindows()
-  -- INCREASED SIZE
   local width = 80
   local height = 25
 
@@ -170,7 +168,7 @@ function m.makeWindows()
 
   m.promptWin = vim.api.nvim_open_win(m.promptBuf, true, promptOpts)
 
-  -- UI Styling: Apply 'DocsTransparent' to Normal to make background see-through
+
   local winhl_result = "Normal:DocsTransparent,FloatBorder:DocsBorder,CursorLine:DocsSel,FloatTitle:DocsTitle"
   local winhl_prompt = "Normal:DocsTransparent,FloatBorder:DocsBorder,FloatTitle:DocsTitle"
 
