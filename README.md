@@ -1,6 +1,6 @@
 # Doc.nvim
 
-![ Demo git]("assets/demo.gif")
+![ Demo git](assets/demo.gif)
 
 ## The Problem 
 Every found your self jumping between the terminal and google documentation , I have , and let me tell you it is not fun.
