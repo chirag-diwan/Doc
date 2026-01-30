@@ -6,6 +6,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/chirag-diwan/Doc.git/internal/local"
 	"github.com/chirag-diwan/Doc.git/internal/network"
 	"github.com/neovim/go-client/nvim/plugin"
 )
@@ -53,6 +54,42 @@ func main() {
 				return data, nil
 			},
 		)
+		p.HandleFunction(
+			&plugin.FunctionOptions{
+				Name: "GetFiles",
+			},
+			func(args []string) (local.DirTree, error) {
+				if len(args) != 1 {
+					return local.DirTree{}, fmt.Errorf("Expected 1 argument got :: %d", len(args))
+				}
+				return local.GetFiles(args[0]), nil
+			},
+		)
+
+		p.HandleFunction(
+			&plugin.FunctionOptions{
+				Name: "OpenFile",
+			},
+			func(args []string) (string, error) {
+				if len(args) != 1 {
+					return "", fmt.Errorf("Expected 1 argument got :: %d", len(args))
+				}
+				return local.OpenFile(args[0])
+			},
+		)
+
+		p.HandleFunction(
+			&plugin.FunctionOptions{
+				Name: "WriteFile",
+			},
+			func(args []string) (string, error) {
+				if len(args) != 1 {
+					return "", fmt.Errorf("Expected 2 argument got :: %d", len(args))
+				}
+				return "", local.WriteFile(args[0], args[1])
+			},
+		)
+
 		return nil
 	})
 }
