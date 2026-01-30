@@ -12,13 +12,13 @@ Doc is a nvim plugin that integrates the documentation for many languages into j
 # Installation
 
 
-```lazy
+``` lazy
 {
     "chirag-diwan/Doc"   
 }
 ```
 
-```plug
+``` plug
 
 Plug 'chirag-diwan/Doc'
 
@@ -31,11 +31,14 @@ Doc has a minimal configuration setup for its inital development stages
 ```lua
 
 require("Doc.core").setup({
-    enable = true
-    keymaps = {
-        open = "<leader>dd"
-        openauto = "<leader>da"
-    }
+  enabled = true,
+  keymaps = {
+    openauto = "<leader>da",
+    open = "<leader>do",
+    openlocal = "<leader>dl",
+    createdoc = "<leader>dc"
+  },
+  localDir = "<local directory to save file>",
 })
 
 ```
