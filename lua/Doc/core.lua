@@ -149,6 +149,12 @@ function M.open_picker(is_local)
   local opts = { buffer = state.buffers.prompt, silent = true }
   vim.keymap.set("i", "<C-n>", function() M.move_cursor(1) end, opts)
   vim.keymap.set("i", "<C-p>", function() M.move_cursor(-1) end, opts)
+
+  vim.keymap.set("i", "<Down>", function() M.move_cursor(1) end, opts)
+  vim.keymap.set("i", "<Up>", function() M.move_cursor(-1) end, opts)
+
+  vim.keymap.set("i", "<CR>", M.confirm_selection, opts)
+  vim.keymap.set({ "i", "n" }, "<Esc>", M.close, opts)
   vim.keymap.set("i", "<CR>", M.confirm_selection, opts)
   vim.keymap.set({ "i", "n" }, "<Esc>", M.close, opts)
 
@@ -208,7 +214,40 @@ function M.create_doc()
   local name = vim.fn.input("Doc Name: ")
   if name == "" then return end
   local path = state.config.localDir .. name .. ".md"
+  M.open_floating_file(path)
+end
+
+function M.open_floating_file(path)
+  local width = math.floor(vim.o.columns * 0.8)
+  local height = math.floor(vim.o.lines * 0.8)
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+
+  local buf = vim.api.nvim_create_buf(false, true)
+
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = "rounded",
+    title = " " .. vim.fn.fnamemodify(path, ":t") .. " ",
+    title_pos = "center",
+  })
+
+
   vim.cmd("edit " .. path)
+
+
+  vim.wo[win].signcolumn = "yes"
+  vim.wo[win].winhl = "Normal:NormalFloat,FloatBorder:FloatBorder"
+
+
+  vim.keymap.set("n", "q", ":close<CR>", { buffer = 0, silent = true, nowait = true })
 end
 
 return M
