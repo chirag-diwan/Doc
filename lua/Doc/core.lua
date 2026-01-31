@@ -180,7 +180,7 @@ function M.confirm_selection()
   local selected = state.current_list[state.cursor]
   M.close()
   if selected then
-    vim.cmd("edit " .. selected.path)
+    M.open_floating_file(selected.path)
   end
 end
 
@@ -243,7 +243,6 @@ function M.open_floating_file(path)
   vim.cmd("edit " .. path)
 
 
-  vim.wo[win].signcolumn = "yes"
   vim.wo[win].winhl = "Normal:NormalFloat,FloatBorder:FloatBorder"
 
 
