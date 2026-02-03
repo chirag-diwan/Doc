@@ -1,416 +1,481 @@
 local M = {}
 
 
-local Config = {
+local defaults = {
   enabled = true,
-  icons = {
-    search = "🔍",
-    file = "📄",
-    dir = "📁",
-    net = "🌐",
-    spinner = { "⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷" },
-  },
   keymaps = {
     openauto = "<leader>da",
     open = "<leader>do",
     openlocal = "<leader>dl",
-    createdoc = "<leader>dc",
+    createdoc = "<leader>dc"
   },
-  local_dir = vim.fn.stdpath("data") .. "/docs/",
+  localDir = vim.fn.stdpath("data") .. "/tmp/doc/",
 
-  default_topics = {
-    "lua", "python", "javascript", "typescript", "rust", "go", "c++", "c",
-    "html", "css", "docker", "kubernetes", "git", "bash", "vim", "react",
-    "sql", "regex", "markdown", "json", "yaml"
-  },
+  ui = {
+    icons = {
+      search = " ",
+      file = "📄",
+      dir = " ",
+      pill = "│",
+    },
+    winblend = 10,
+    border = "shadow",
+  }
 }
 
-local State = {
-  buf = { prompt = nil, results = nil },
-  win = { prompt = nil, results = nil },
-  ns = vim.api.nvim_create_namespace("doc_plugin_ui"),
-  mode = "local",
-  query = "",
+local state = {
+  config = {},
+  ns = vim.api.nvim_create_namespace("doc_plugin"),
+  current_list = {},
   cursor = 1,
-  results = {},
-  spinner_timer = nil,
-  spinner_frame = 1,
-  loading = false,
-  files_cache = {},
+  prompt = "",
+  is_local = false,
+  indices = { entries = {} },
+  windows = { prompt = nil, result = nil },
+  buffers = { prompt = nil, result = nil },
 }
 
 
+local has_devicons, devicons = pcall(require, "nvim-web-devicons")
 
+local function get_icon(name, is_dir)
+  if is_dir then return defaults.ui.icons.dir, "DocsDir" end
+  if not has_devicons then return defaults.ui.icons.file, "DocsFile" end
 
-local Utils = {}
-
-function Utils.debounce(ms, fn)
-  local timer = vim.uv.new_timer()
-  return function(...)
-    local args = { ... }
-    timer:stop()
-    timer:start(ms, 0, vim.schedule_wrap(function()
-      fn(unpack(args))
-    end))
-  end
+  local ext = vim.fn.fnamemodify(name, ":e")
+  local icon, icon_name = devicons.get_icon(name, ext, { default = true })
+  return icon .. " ", "DevIcon" .. icon_name
 end
 
-function Utils.center_win_opts(width_pct, height_pct)
-  local cols = vim.o.columns
-  local lines = vim.o.lines
-  local width = math.floor(cols * width_pct)
-  local height = math.floor(lines * height_pct)
-  local row = math.floor((lines - height) / 2)
-  local col = math.floor((cols - width) / 2)
-  return { width = width, height = height, row = row, col = col }
-end
-
-function Utils.fs_scan(path)
-  local files = {}
-  local handle = vim.uv.fs_scandir(path)
-  if not handle then return files end
+local function scan_local_dir(path)
+  local entries = {}
+  local handle = vim.loop.fs_scandir(path)
+  if not handle then return entries end
 
   while true do
-    local name, type = vim.uv.fs_scandir_next(handle)
+    local name, type = vim.loop.fs_scandir_next(handle)
     if not name then break end
     local full_path = path .. "/" .. name
     if type == "directory" then
-      local sub = Utils.fs_scan(full_path)
-      vim.list_extend(files, sub)
+      local sub = scan_local_dir(full_path)
+      vim.list_extend(entries, sub)
     else
-      table.insert(files, { name = name, path = full_path, type = "file" })
+      table.insert(entries, { name = name, path = full_path, type = "file" })
     end
   end
-  return files
+  return entries
 end
 
-local UI = {}
-
-function UI.setup_highlights()
+local function set_highlights()
   local hls = {
-    DocBorder    = { link = "FloatBorder", default = true },
-    DocTitle     = { link = "FloatTitle", default = true },
-    DocSelection = { link = "Visual", default = true },
-    DocIcon      = { link = "Directory", default = true },
-    DocFile      = { link = "String", default = true },
-    DocPrompt    = { link = "Normal", default = true },
-    DocSpinner   = { link = "WarningMsg", default = true },
+    DocsBorder     = { fg = "#89b4fa" },
+    DocsTitle      = { fg = "#cba6f7", bold = true },
+    DocsPrompt     = { fg = "#cdd6f4" },
+    DocsPromptIcon = { fg = "#f9e2af" },
+    DocsSel        = { bg = "#313244", bold = true },
+    DocsSelIcon    = { fg = "#a6e3a1" },
+    DocsMatch      = { fg = "#f38ba8", bold = true, underline = true },
+    DocsComment    = { fg = "#6c7086", italic = true },
+    DocsDir        = { fg = "#89b4fa" },
+    DocsFile       = { fg = "#a6adc8" },
   }
-  for group, opts in pairs(hls) do
-    vim.api.nvim_set_hl(0, group, opts)
+
+  for name, opts in pairs(hls) do
+    opts.default = true
+    vim.api.nvim_set_hl(0, name, opts)
   end
 end
 
-function UI.start_spinner()
-  if State.spinner_timer then return end
-  State.loading = true
-  State.spinner_timer = vim.uv.new_timer()
-  State.spinner_timer:start(0, 100, vim.schedule_wrap(function()
-    State.spinner_frame = (State.spinner_frame % #Config.icons.spinner) + 1
-    UI.render_prompt_title()
-  end))
-end
+function M.render_results()
+  if not state.buffers.result or not vim.api.nvim_buf_is_valid(state.buffers.result) then return end
 
-function UI.stop_spinner()
-  if State.spinner_timer then
-    State.spinner_timer:stop()
-    State.spinner_timer:close()
-    State.spinner_timer = nil
+
+  vim.api.nvim_buf_clear_namespace(state.buffers.result, state.ns, 0, -1)
+
+
+  if #state.current_list == 0 then
+    local empty_msg = "   󰅺  No results found"
+    vim.api.nvim_buf_set_lines(state.buffers.result, 0, -1, false, { "", empty_msg })
+    vim.api.nvim_buf_add_highlight(state.buffers.result, state.ns, "DocsComment", 1, 0, -1)
+    return
   end
-  State.loading = false
-  UI.render_prompt_title()
-end
 
-function UI.render_prompt_title()
-  if not State.win.prompt or not vim.api.nvim_win_is_valid(State.win.prompt) then return end
+  if not state.is_local then
+    local lines = {}
 
-  local icon = State.loading
-      and Config.icons.spinner[State.spinner_frame]
-      or Config.icons.search
+    for _, item in ipairs(state.current_list) do
+      table.insert(lines, "  " .. item)
+    end
+    vim.api.nvim_buf_set_lines(state.buffers.result, 0, -1, false, lines)
 
-  local title_text = string.format(" %s %s Docs ", icon, (State.mode == "local" and "Local" or "Online"))
+    local idx = state.cursor - 1
 
 
-  vim.api.nvim_win_set_config(State.win.prompt, {
-    title = title_text,
-    title_pos = "center"
-  })
-end
+    if state.current_list[state.cursor] then
+      vim.api.nvim_buf_add_highlight(state.buffers.result, state.ns, "DocsSel", idx, 0, -1)
+      vim.api.nvim_buf_set_extmark(state.buffers.result, state.ns, idx, 0, {
+        virt_text = { { defaults.ui.icons.pill, "DocsTitle" } },
+        virt_text_pos = "overlay",
+      })
+    end
 
-function UI.render_results()
-  if not State.buf.results or not vim.api.nvim_buf_is_valid(State.buf.results) then return end
+
+    if state.prompt ~= "" then
+      for i, item in ipairs(state.current_list) do
+        local start_match, end_match = item:lower():find(state.prompt:lower(), 1, true)
+        if start_match then
+          vim.api.nvim_buf_add_highlight(state.buffers.result, state.ns, "DocsMatch", i - 1, start_match + 1,
+            end_match + 2)
+        end
+      end
+    end
+
+    return
+  end
+
 
   local lines = {}
-  local highlights = {}
-
-  if #State.results == 0 then
-    lines = { "", "   No results found for '" .. State.query .. "'" }
-  else
-    for i, item in ipairs(State.results) do
-      local icon = State.mode == "local" and Config.icons.file or Config.icons.net
-      local name = type(item) == "string" and item or item.name
-      local padding = (i == State.cursor) and " > " or "   "
-      table.insert(lines, string.format("%s%s %s", padding, icon, name))
+  local icon_data = {}
 
 
-      table.insert(highlights, {
-        line = i - 1,
-        is_selected = (i == State.cursor)
+  for i, entry in ipairs(state.current_list) do
+    local name = (type(entry) == "table") and entry.name or entry
+    local is_dir = (type(entry) == "table") and (entry.type == "directory") or false
+
+
+    local icon, icon_hl = get_icon(name, is_dir)
+
+
+    local display_line = string.format("  %s %s", icon, name)
+    table.insert(lines, display_line)
+
+    table.insert(icon_data, {
+      icon_len = #icon,
+      icon_hl = icon_hl,
+      text_start = 4 + #icon
+    })
+  end
+
+  vim.api.nvim_buf_set_lines(state.buffers.result, 0, -1, false, lines)
+
+
+  for i, entry in ipairs(state.current_list) do
+    local idx = i - 1
+    local name = (type(entry) == "table") and entry.name or entry
+    local meta = icon_data[i]
+
+
+    if i == state.cursor then
+      vim.api.nvim_buf_add_highlight(state.buffers.result, state.ns, "DocsSel", idx, 0, -1)
+
+      vim.api.nvim_buf_set_extmark(state.buffers.result, state.ns, idx, 0, {
+        virt_text = { { defaults.ui.icons.pill, "DocsTitle" } },
+        virt_text_pos = "overlay",
+      })
+    end
+
+
+    vim.api.nvim_buf_add_highlight(state.buffers.result, state.ns, meta.icon_hl, idx, 2, 2 + meta.icon_len)
+
+
+    if state.prompt ~= "" then
+      local start_match, end_match = name:lower():find(state.prompt:lower(), 1, true)
+      if start_match then
+        local offset = 3 + meta.icon_len
+        vim.api.nvim_buf_add_highlight(state.buffers.result, state.ns, "DocsMatch", idx, offset + start_match - 1,
+          offset + end_match)
+      end
+    end
+
+
+    if type(entry) == "table" and entry.type then
+      vim.api.nvim_buf_set_extmark(state.buffers.result, state.ns, idx, 0, {
+        virt_text = { { entry.type, "DocsComment" } },
+        virt_text_pos = "right_align",
       })
     end
   end
-
-  vim.api.nvim_buf_set_lines(State.buf.results, 0, -1, false, lines)
-
-
-  vim.api.nvim_buf_clear_namespace(State.buf.results, State.ns, 0, -1)
-
-  for _, hl in ipairs(highlights) do
-    if hl.is_selected then
-      vim.api.nvim_buf_add_highlight(State.buf.results, State.ns, "DocSelection", hl.line, 0, -1)
-    end
-
-    vim.api.nvim_buf_add_highlight(State.buf.results, State.ns, "DocIcon", hl.line, 3, 6)
-
-    vim.api.nvim_buf_add_highlight(State.buf.results, State.ns, "DocFile", hl.line, 6, -1)
-  end
 end
 
-local Core = {}
+function M.filter_list()
+  if state.is_local then
+    local all = scan_local_dir(state.config.localDir)
 
-function Core.filter_list()
-  local q = State.query:lower()
-
-  local source = {}
-  if State.mode == "local" then
-    source = State.files_cache
-  else
-    source = Config.default_topics
-  end
-
-  if q == "" then
-    State.results = source
-  else
-    State.results = vim.tbl_filter(function(item)
-      local text = (type(item) == "table" and item.name or item):lower()
-      return text:find(q, 1, true) ~= nil
-    end, source)
-  end
-
-
-  if State.mode == "online" and q ~= "" then
-    local exact_match = false
-    for _, item in ipairs(State.results) do
-      if item == q then
-        exact_match = true
-        break
-      end
+    if state.prompt == "" then
+      state.current_list = all
+    else
+      state.current_list = vim.tbl_filter(function(item)
+        return item.name:lower():find(state.prompt:lower(), 1, true) ~= nil
+      end, all)
     end
-    if not exact_match then
-      table.insert(State.results, 1, q)
+
+    state.cursor = math.min(math.max(1, state.cursor), #state.current_list)
+  else
+    if state.prompt == "" then
+      state.current_list = state.indices.entries
+    else
+      state.current_list = vim.tbl_filter(function(item)
+        return item:lower():find(state.prompt:lower(), 1, true) ~= nil
+      end, state.indices.entries)
     end
   end
 
-  State.cursor = 1
-  UI.render_results()
-end
+  M.render_results()
 
-Core.on_input = Utils.debounce(50, function()
-  if not State.buf.prompt or not vim.api.nvim_buf_is_valid(State.buf.prompt) then return end
-  local lines = vim.api.nvim_buf_get_lines(State.buf.prompt, 0, 1, false)
-  local new_query = lines[1] or ""
 
-  if new_query ~= State.query then
-    State.query = new_query
-    Core.filter_list()
-  end
-end)
-
-function Core.confirm()
-  local selection = State.results[State.cursor]
-  if not selection then return end
-
-  M.close()
-
-  if State.mode == "local" then
-    Core.open_floating_doc(selection.path, selection.name)
-  else
-    Core.fetch_online(selection)
+  if state.is_local and state.windows.result and vim.api.nvim_win_is_valid(state.windows.result) then
+    pcall(vim.api.nvim_win_set_cursor, state.windows.result, { state.cursor, 0 })
   end
 end
 
-function Core.fetch_online(query)
-  local url = string.format("https://cheat.sh/%s?T", query)
+function M.open_picker(is_local)
+  state.is_local = is_local
+  state.prompt = ""
+  state.cursor = 1
+
+  state.buffers.result = vim.api.nvim_create_buf(false, true)
+  state.buffers.prompt = vim.api.nvim_create_buf(false, true)
 
 
-  local buf = vim.api.nvim_create_buf(false, true)
-  local dim = Utils.center_win_opts(0.8, 0.8)
-  local win = vim.api.nvim_open_win(buf, true, {
+  local width = math.floor(vim.o.columns * 0.6)
+  local height = 16
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+
+  state.windows.result = vim.api.nvim_open_win(state.buffers.result, false, {
     relative = "editor",
-    width = dim.width,
-    height = dim.height,
-    row = dim.row,
-    col = dim.col,
+    width = width,
+    height = height - 3,
+    row = row + 3,
+    col = col,
     style = "minimal",
-    border = "rounded",
-    title = " Fetching " .. query .. "... ",
+    border = state.config.ui.border,
+    title = is_local and "   Local Docs " or " 󰖟 Online Docs ",
+    title_pos = "center",
   })
 
 
-  vim.system({ "curl", "-s", url }, { text = true }, vim.schedule_wrap(function(obj)
-    if not vim.api.nvim_win_is_valid(win) then return end
-
-    if obj.code ~= 0 then
-      vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Error fetching data.", obj.stderr })
-      return
-    end
-
-    local lines = vim.split(obj.stdout, "\n")
-    vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
-    vim.api.nvim_set_option_value("filetype", "sh", { buf = buf })
-    vim.api.nvim_win_set_config(win, { title = " " .. query .. " " })
-
-
-    vim.keymap.set("n", "q", function() vim.api.nvim_win_close(win, true) end, { buffer = buf })
-  end))
-end
-
-function Core.open_floating_doc(path, title)
-  local dim = Utils.center_win_opts(0.8, 0.8)
-  local buf = vim.api.nvim_create_buf(false, true)
-
-  local win = vim.api.nvim_open_win(buf, true, {
+  state.windows.prompt = vim.api.nvim_open_win(state.buffers.prompt, true, {
     relative = "editor",
-    width = dim.width,
-    height = dim.height,
-    row = dim.row,
-    col = dim.col,
-    style = "minimal",
-    border = "rounded",
-    title = " " .. title .. " ",
-  })
-
-  vim.cmd("edit " .. vim.fn.fnameescape(path))
-  vim.keymap.set("n", "q", ":close<CR>", { buffer = buf, silent = true })
-  vim.wo[win].winhl = "Normal:NormalFloat,FloatBorder:DocBorder"
-end
-
-function M.open_picker(mode)
-  State.mode = mode
-  State.query = ""
-  State.cursor = 1
-
-
-  if mode == "local" then
-    if vim.fn.isdirectory(Config.local_dir) == 0 then
-      vim.fn.mkdir(Config.local_dir, "p")
-    end
-    State.files_cache = Utils.fs_scan(Config.local_dir)
-  end
-
-
-  local total_width = math.floor(vim.o.columns * 0.6)
-  local total_height = 15
-  local row_start = math.floor((vim.o.lines - total_height) / 2)
-  local col_start = math.floor((vim.o.columns - total_width) / 2)
-
-
-  State.buf.results = vim.api.nvim_create_buf(false, true)
-  State.win.results = vim.api.nvim_open_win(State.buf.results, false, {
-    relative = "editor",
-    width = total_width,
-    height = total_height - 3,
-    row = row_start + 3,
-    col = col_start,
-    style = "minimal",
-    border = "rounded",
-  })
-
-
-  State.buf.prompt = vim.api.nvim_create_buf(false, true)
-  State.win.prompt = vim.api.nvim_open_win(State.buf.prompt, true, {
-    relative = "editor",
-    width = total_width,
+    width = width,
     height = 1,
-    row = row_start,
-    col = col_start,
+    row = row,
+    col = col,
     style = "minimal",
-    border = "rounded",
-    title = " Search ",
-    title_pos = "center"
+    border = state.config.ui.border,
+    title = " " .. state.config.ui.icons.search .. " Search ",
+    title_pos = "left",
   })
 
 
-  vim.wo[State.win.results].winhl = "Normal:NormalFloat,FloatBorder:DocBorder"
-  vim.wo[State.win.prompt].winhl = "Normal:DocPrompt,FloatBorder:DocBorder"
-  vim.api.nvim_set_option_value("buftype", "prompt", { buf = State.buf.prompt })
+  vim.wo[state.windows.result].cursorline = false
+  vim.wo[state.windows.result].winblend = state.config.ui.winblend
+  vim.wo[state.windows.result].winhl = "Normal:NormalFloat,FloatBorder:DocsBorder,FloatTitle:DocsTitle"
+
+  vim.wo[state.windows.prompt].winblend = state.config.ui.winblend
+  vim.wo[state.windows.prompt].winhl = "Normal:NormalFloat,FloatBorder:DocsBorder,FloatTitle:DocsTitle"
 
 
-  local opts = { buffer = State.buf.prompt, silent = true }
+  vim.api.nvim_set_option_value("buftype", "prompt", { buf = state.buffers.prompt })
+  vim.fn.prompt_setprompt(state.buffers.prompt, "  ")
 
-  vim.keymap.set("i", "<C-n>", function()
-    State.cursor = math.min(#State.results, State.cursor + 1)
-    UI.render_results()
-  end, opts)
+  local opts = { buffer = state.buffers.prompt, silent = true }
 
-  vim.keymap.set("i", "<C-p>", function()
-    State.cursor = math.max(1, State.cursor - 1)
-    UI.render_results()
-  end, opts)
 
-  vim.keymap.set("i", "<CR>", Core.confirm, opts)
+  vim.keymap.set("i", "<C-n>", function() M.move_cursor(1) end, opts)
+  vim.keymap.set("i", "<C-p>", function() M.move_cursor(-1) end, opts)
+  vim.keymap.set("i", "<Down>", function() M.move_cursor(1) end, opts)
+  vim.keymap.set("i", "<Up>", function() M.move_cursor(-1) end, opts)
+  vim.keymap.set("i", "<CR>", M.confirm_selection, opts)
   vim.keymap.set({ "i", "n" }, "<Esc>", M.close, opts)
 
+  M.filter_list()
 
   vim.api.nvim_create_autocmd("TextChangedI", {
-    buffer = State.buf.prompt,
-    callback = Core.on_input
+    buffer = state.buffers.prompt,
+    callback = function()
+      local lines = vim.api.nvim_buf_get_lines(state.buffers.prompt, 0, 1, false)
+      state.prompt = lines[1] or ""
+
+      if state.prompt:sub(1, 2) == "  " then state.prompt = state.prompt:sub(3) end
+
+      M.filter_list()
+    end,
   })
 
-
-  UI.render_prompt_title()
-  Core.filter_list()
+  M.filter_list()
   vim.cmd("startinsert")
 end
 
-function M.create_doc()
-  local name = vim.fn.input("New Doc Name: ")
-  if name == "" then return end
+function M.move_cursor(delta)
+  if state.is_local then
+    state.cursor = math.max(1, math.min(state.cursor + delta, #state.current_list))
 
-  if not name:match("%.md$") then name = name .. ".md" end
+    M.render_results()
 
-  if vim.fn.isdirectory(Config.local_dir) == 0 then
-    vim.fn.mkdir(Config.local_dir, "p")
+
+    if vim.api.nvim_win_is_valid(state.windows.result) then
+      pcall(vim.api.nvim_win_set_cursor, state.windows.result, { state.cursor, 0 })
+    end
+  else
+    state.cursor = math.max(1, math.min(state.cursor + delta, #state.current_list))
+    M.render_results()
+
+
+    if vim.api.nvim_win_is_valid(state.windows.result) then
+      pcall(vim.api.nvim_win_set_cursor, state.windows.result, { state.cursor, 0 })
+    end
   end
+end
 
-  local path = Config.local_dir .. name
-  Core.open_floating_doc(path, name)
+function M.confirm_selection()
+  if state.is_local then
+    local selected = state.current_list[state.cursor]
+
+    if selected then
+      M.open_floating_file(selected.path)
+    end
+    M.close()
+  else
+    M.close()
+
+
+    local buf = vim.api.nvim_create_buf(true, false)
+    local width = math.floor(vim.o.columns * 0.8)
+    local height = math.floor(vim.o.lines * 0.8)
+
+    local win = vim.api.nvim_open_win(buf, true, {
+      relative = "editor",
+      width = width,
+      height = height,
+      row = math.floor((vim.o.lines - height) / 2),
+      col = math.floor((vim.o.columns - width) / 2),
+      style = "minimal",
+      border = "rounded",
+      title = " 󰚩 " .. state.prompt .. " ",
+      title_pos = "center",
+      footer = " q: Close ",
+      footer_pos = "center"
+    })
+
+
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "", "   󰑮  Fetching cheatsheet for '" .. state.prompt .. "'..." })
+    vim.api.nvim_set_option_value("filetype", "markdown", { buf = buf })
+
+    local url = string.format("https://cheat.sh/%s?T", state.current_list[state.cursor])
+
+    vim.system({ 'curl', '-s', url }, { text = true }, vim.schedule_wrap(function(obj)
+      if not vim.api.nvim_win_is_valid(win) then return end
+
+      if obj.code ~= 0 then
+        vim.api.nvim_buf_set_lines(buf, 0, -1, false, { "Error fetching data.", obj.stderr })
+        return
+      end
+
+      local lines = vim.split(obj.stdout, "\n")
+      vim.api.nvim_buf_set_lines(buf, 0, -1, false, lines)
+      vim.api.nvim_set_option_value("filetype", "sh", { buf = buf })
+      vim.wo[win].winhl = "Normal:NormalFloat,FloatBorder:DocsBorder,FloatTitle:DocsTitle"
+    end))
+
+    vim.keymap.set("n", "q", function() vim.api.nvim_win_close(win, true) end, { buffer = buf, silent = true })
+  end
 end
 
 function M.close()
-  if State.win.prompt and vim.api.nvim_win_is_valid(State.win.prompt) then
-    vim.api.nvim_win_close(State.win.prompt, true)
+  if state.windows.prompt and vim.api.nvim_win_is_valid(state.windows.prompt) then
+    vim.api.nvim_win_close(state.windows.prompt, true)
   end
-  if State.win.results and vim.api.nvim_win_is_valid(State.win.results) then
-    vim.api.nvim_win_close(State.win.results, true)
+
+  if state.windows.result and vim.api.nvim_win_is_valid(state.windows.result) then
+    vim.api.nvim_win_close(state.windows.result, true)
   end
-  State.win.prompt = nil
-  State.win.results = nil
-  UI.stop_spinner()
+
   vim.cmd("stopinsert")
 end
 
-function M.setup(user_opts)
-  Config = vim.tbl_deep_extend("force", Config, user_opts or {})
-  if not Config.enabled then return end
+function M.setup(user_config)
+  state.config = vim.tbl_deep_extend("force", defaults, user_config or {})
 
-  UI.setup_highlights()
+  if not state.config.enabled then return end
 
+  set_highlights()
 
-  local km = Config.keymaps
-  vim.keymap.set("n", km.openlocal, function() M.open_picker("local") end, { desc = "Docs: Local" })
-  vim.keymap.set("n", km.open, function() M.open_picker("online") end, { desc = "Docs: Online" })
-  vim.keymap.set("n", km.createdoc, M.create_doc, { desc = "Docs: Create New" })
+  if vim.fn.isdirectory(state.config.localDir) == 0 then
+    vim.fn.mkdir(state.config.localDir, "p")
+  end
+
+  state.data_dir = vim.fn.stdpath('data')
+
+  local current_file = debug.getinfo(1, "S").source:sub(2)
+
+  state.data_dir = vim.fn.fnamemodify(current_file, ":h")
+
+  local f = io.open(state.data_dir .. "/index.txt", "r")
+
+  if f then
+    for line in f:lines() do
+      table.insert(state.indices.entries, line)
+    end
+
+    local suc
+    suc = f:close()
+
+    if not suc then
+      error(err)
+    end
+  end
+
+  local km = state.config.keymaps
+
+  vim.keymap.set("n", km.openlocal,
+    function()
+      M.open_picker(true)
+    end
+    , { desc = "Docs: Local Files" }
+  )
+
+  vim.keymap.set("n", km.open, function() M.open_picker(false) end, { desc = "Docs: Online Search" })
+
+  vim.keymap.set("n", km.createdoc, M.create_doc, { desc = "Docs: New Document" })
 end
+
+function M.create_doc()
+  local name = vim.fn.input("Doc Name: ")
+
+  if name == "" then return end
+
+  local path = state.config.localDir .. name .. ".md"
+
+  M.open_floating_file(path)
+end
+
+function M.open_floating_file(path)
+  local width = math.floor(vim.o.columns * 0.8)
+  local height = math.floor(vim.o.lines * 0.8)
+  local row = math.floor((vim.o.lines - height) / 2)
+  local col = math.floor((vim.o.columns - width) / 2)
+
+  local buf = vim.api.nvim_create_buf(false, true)
+
+  local win = vim.api.nvim_open_win(buf, true, {
+    relative = "editor",
+    width = width,
+    height = height,
+    row = row,
+    col = col,
+    style = "minimal",
+    border = state.config.ui.border,
+    title = "  " .. vim.fn.fnamemodify(path, ":t") .. " ",
+    title_pos = "center",
+  })
+
+  vim.cmd("edit " .. path)
+  vim.wo[win].winhl = "Normal:NormalFloat,FloatBorder:DocsBorder,FloatTitle:DocsTitle"
+  vim.keymap.set("n", "q", ":close<CR>", { buffer = 0, silent = true, nowait = true })
+end
+
+M.setup({})
 
 return M
